@@ -52,9 +52,13 @@ def _cmd_serve(args) -> None:
     import logging
 
     from .server import serve
+    from .session import AuthError
 
     if not args.host:
         raise SystemExit("jetkvm: serve needs a host (argument or JETKVM_HOST)")
+    if args.password_file:
+        with open(args.password_file, encoding="utf-8") as f:
+            args.password = f.read().strip()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     if not args.verbose:
@@ -62,6 +66,8 @@ def _cmd_serve(args) -> None:
             logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         asyncio.run(serve(args.host, args.port, args.password, args.layout))
+    except AuthError as e:
+        raise SystemExit(f"jetkvm: {e}") from None
     except KeyboardInterrupt:
         pass
 
@@ -126,8 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="connect to a JetKVM and run the local control API")
     s.add_argument("host", nargs="?", default=os.environ.get("JETKVM_HOST"),
                    help="JetKVM IP or hostname (env JETKVM_HOST)")
-    s.add_argument("--password", default=os.environ.get("JETKVM_PASSWORD"),
-                   help="device password, if one is set (env JETKVM_PASSWORD)")
+    pw = s.add_mutually_exclusive_group()
+    pw.add_argument("--password", default=os.environ.get("JETKVM_PASSWORD"),
+                    help="device password, if one is set. Prefer env JETKVM_PASSWORD or "
+                         "--password-file: arguments show up in process lists and shell history")
+    pw.add_argument("--password-file", metavar="FILE", help="read the device password from FILE")
     s.add_argument("--layout", choices=sorted(LAYOUTS), default="us",
                    help="default keyboard layout of the target machine (default us)")
     s.add_argument("-v", "--verbose", action="store_true", help="debug logging")

@@ -37,6 +37,18 @@ class NotConnected(ConnectionError):
     pass
 
 
+class AuthError(NotConnected):
+    """Missing or wrong password: retrying will not help."""
+
+
+class RateLimited(NotConnected):
+    """The device is refusing logins after too many failed attempts."""
+
+    def __init__(self, retry_after: float):
+        super().__init__(f"too many login attempts; device says retry in {retry_after:.0f}s")
+        self.retry_after = retry_after
+
+
 class JetKVMSession:
     def __init__(self, host: str, password: str | None = None):
         self.host = host
@@ -67,18 +79,31 @@ class JetKVMSession:
 
     # ------------------------------------------------------------ lifecycle
     async def run_forever(self) -> None:
-        """Connect, and keep reconnecting with backoff until ``close()``."""
+        """Connect, and keep reconnecting with backoff until ``close()``.
+
+        Raises ``AuthError`` if the password is missing or wrong, since
+        retrying would only burn through the device's login rate limit.
+        """
         backoff = 1.0
         while not self._closing:
             self._was_connected = False
+            delay = None
             try:
                 await self._connect_once()
-            except Exception as e:  # noqa: BLE001 - any failure means "retry"
+            except AuthError:
+                raise
+            except RateLimited as e:
+                log.warning("%s", e)
+                delay = e.retry_after
+            except Exception as e:  # noqa: BLE001 - any other failure means "retry"
                 log.warning("connection error: %s", e)
             finally:
                 await self._teardown()
             if self._closing:
                 break
+            if delay is not None:
+                await asyncio.sleep(delay)
+                continue
             if self._was_connected:
                 backoff = 1.0
             if self.taken_over:
@@ -107,8 +132,15 @@ class JetKVMSession:
         self._http = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         if self.password:
             await self._login()
-        self._ws = ws = await self._http.ws_connect(
-            f"ws://{self.host}/webrtc/signaling/client", headers={"Origin": self.origin})
+        try:
+            self._ws = ws = await self._http.ws_connect(
+                f"ws://{self.host}/webrtc/signaling/client", headers={"Origin": self.origin})
+        except aiohttp.WSServerHandshakeError as e:
+            if e.status == 401:
+                raise AuthError(
+                    "the device rejected the session after a successful login" if self.password else
+                    "the device requires a password: set JETKVM_PASSWORD or pass --password") from None
+            raise
         log.info("signaling connected to %s", self.host)
 
         # LAN only: no STUN/TURN (aiortc would otherwise default to a public STUN server).
@@ -218,11 +250,26 @@ class JetKVMSession:
         log.info("signaling closed (code %s)", ws.close_code)
 
     async def _login(self) -> None:
+        """Log in like the web UI; the ``authToken`` cookie lands in the session's jar.
+
+        The jar must be created with ``unsafe=True`` or aiohttp drops cookies
+        set by IP-address hosts, which is how most people reach their KVM.
+        """
         assert self._http is not None
         async with self._http.post(f"{self.origin}/auth/login-local", json={"password": self.password},
                                    headers={"Origin": self.origin}) as r:
-            if r.status != 200:
-                raise NotConnected(f"login failed (HTTP {r.status})")
+            if r.status == 200:
+                log.info("logged in")
+                return
+            try:
+                body = await r.json(content_type=None)
+            except ValueError:
+                body = {}
+            if r.status == 401:
+                raise AuthError("wrong password")
+            if r.status == 429:
+                raise RateLimited(float((body or {}).get("retry_after") or 60))
+            raise NotConnected(f"login failed (HTTP {r.status})")
 
     async def _teardown(self) -> None:
         self._ready.clear()
@@ -386,6 +433,7 @@ class JetKVMSession:
             "ready": self._ready.is_set(),
             "taken_over": self.taken_over,
             "firmware": self.device_version,
+            "auth": "password" if self.password else "none",
             "screen": size,
             "frames": self.frame_count,
             "frame_age_s": round(time.time() - self.frame_time, 1) if self.frame is not None else None,

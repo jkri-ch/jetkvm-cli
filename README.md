@@ -23,6 +23,8 @@ pip install git+https://github.com/jkri-ch/jetkvm-cli
 ```sh
 # 1. Hold a session open to the KVM (leave this running)
 jetkvm serve 192.168.1.50
+#    ...or, if the device has a password (see below):
+JETKVM_PASSWORD='...' jetkvm serve 192.168.1.50
 
 # 2. In another terminal
 jetkvm status                         # connection, resolution, USB state
@@ -39,7 +41,7 @@ language.
 
 | Command | What it does |
 |---|---|
-| `jetkvm serve HOST [--password PW] [--layout us\|uk]` | Connect to the KVM and run the local control API. Reconnects automatically. |
+| `jetkvm serve HOST [--password-file FILE] [--layout us\|uk]` | Connect to the KVM and run the local control API. Reconnects automatically. |
 | `jetkvm status` | Connection state, firmware, screen size, video/USB state, keyboard LEDs. |
 | `jetkvm shot [-o FILE\|-] [--crop X0,Y0,X1,Y1] [--scale N] [--delay S]` | Save a PNG of the current screen. `--crop` uses screen pixels. |
 | `jetkvm type TEXT [--enter]` / `-f FILE` / stdin | Type text. `\n` presses Enter. |
@@ -54,6 +56,27 @@ Combo names are case-insensitive: `enter`, `esc`, `tab`, `backspace`, `delete`, 
 `ctrl`, `shift`, `alt`, `meta`/`win`, `altgr`. Use `plus` for the `+` key.
 
 Environment variables: `JETKVM_HOST`, `JETKVM_PASSWORD`, `JETKVM_PORT`.
+
+### Password-protected devices
+
+If you've set a local password on the JetKVM, which you should, give it to `serve` in one of three
+ways, from most to least preferred:
+
+```sh
+JETKVM_PASSWORD='...' jetkvm serve 192.168.1.50        # environment variable
+jetkvm serve 192.168.1.50 --password-file ~/.jetkvm-pw  # file (keep it chmod 600)
+jetkvm serve 192.168.1.50 --password '...'             # visible in process lists and shell history
+```
+
+`serve` logs in the same way the web UI does and logs in again on every reconnect, so the device's
+7-day session expiry doesn't matter. Retrying can't fix a password problem and would only use up the
+device's login attempts, so `serve` stops with a clear error instead:
+
+| Situation | What happens |
+|---|---|
+| Device has a password, none given | Exits: `the device requires a password: set JETKVM_PASSWORD or pass --password` |
+| Wrong password | Exits: `wrong password` |
+| Too many failed attempts (HTTP 429) | Waits as long as the device asks (`retry_after`), then tries again |
 
 ### Keyboard layouts
 
@@ -84,14 +107,17 @@ Errors come back as `{"error": "..."}` with status 400 (bad input), 503 (not con
 
 ## How it works
 
-1. Opens the device's signaling WebSocket at `ws://HOST/webrtc/signaling/client`. The device returns
+1. If a password is set, `POST /auth/login-local` with `{"password": "..."}` returns an `authToken`
+   cookie (`HttpOnly`, 7 days). Without that cookie the API and the signaling socket return 401. The
+   client's cookie jar has to accept cookies from IP-address hosts, which aiohttp refuses by default.
+2. Opens the device's signaling WebSocket at `ws://HOST/webrtc/signaling/client`. The device returns
    403 unless the `Origin` header matches it, the same as a browser on its own page.
-2. Sends a WebRTC offer (base64-encoded JSON SDP) with receive-only video and audio and an `rpc` data
+3. Sends a WebRTC offer (base64-encoded JSON SDP) with receive-only video and audio and an `rpc` data
    channel, then applies the answer and trickled ICE candidates. There's no STUN or TURN, so it works on
    the LAN only.
-3. Decodes the H.264 screen stream with [aiortc](https://github.com/aiortc/aiortc)/PyAV and keeps the
+4. Decodes the H.264 screen stream with [aiortc](https://github.com/aiortc/aiortc)/PyAV and keeps the
    latest frame for `/shot`.
-4. Sends HID input as JSON-RPC 2.0 on the `rpc` channel:
+5. Sends HID input as JSON-RPC 2.0 on the `rpc` channel:
    - `keyboardReport`: `{"keys": [six HID usage codes], "modifier": bitmask}`.
    - `absMouseReport`: `{"x", "y"}` scaled to 0–32767, plus `buttons`.
    - `wheelReport`: `{"wheelY", "wheelX"}`.
@@ -102,10 +128,8 @@ Errors come back as `{"error": "..."}` with status 400 (bad input), 503 (not con
   UI takes over from `serve`. After that, `serve` waits until you run `jetkvm reconnect`.
 - **The control API has no authentication.** It only listens on `127.0.0.1`, but anything running on
   your machine can use it to drive the KVM while `serve` is up.
-- **Password login is untested.** `--password` follows what the web UI does (`POST /auth/login-local`),
-  but it has only been tested against a device in no-password mode. Setting a device password is still
-  strongly recommended.
-- **Tested hardware:** a JetKVM Mini (Ethernet) on firmware 0.5.20, from Windows 11 with Python 3.13.
+- **Tested hardware:** a JetKVM Mini (Ethernet) on firmware 0.5.20, in both no-password and password
+  mode, from Windows 11 with Python 3.13.
 
 ## Development
 
