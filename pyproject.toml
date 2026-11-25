@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jetkvm-cli"
+dynamic = ["version"]
+description = "Unofficial command-line client for JetKVM: screenshots, typing and mouse control from scripts"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "aiortc>=1.9",
+    "aiohttp>=3.9",
+    "pillow>=10",
+]
+keywords = ["jetkvm", "kvm", "ip-kvm", "webrtc", "automation", "homelab"]
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Repository = "https://github.com/jkri-ch/jetkvm-cli"
+
+[project.scripts]
+jetkvm = "jetkvm_cli.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "jetkvm_cli.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
